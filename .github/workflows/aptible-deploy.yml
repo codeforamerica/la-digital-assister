@@ -1,0 +1,78 @@
+name: Deploy to Aptible
+# 1. Run tests on merges to main
+# 2. (Attempt) to deploy to staging
+# 3. if successful, draft release and merge main to staging branch
+
+on:
+  workflow_dispatch:
+    inputs: { }
+
+env:
+  USERNAME: ${{ secrets.GPR_USER }}
+  TOKEN: ${{ secrets.GPR_KEY }}
+jobs:
+  deploy:
+    name: Deploy to Aptible Staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Create env file'
+        run: |
+          echo "${{ secrets.ENV }}" > .env
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+          fetch-depth: 0
+      - name: Install SSH Key
+        uses: shimataro/ssh-key-action@v2.6.1
+        with:
+          key: $APTIBLE_SSH_PRIVATE_KEY
+          known_hosts: $APTIBLE_KNOWN_HOSTS
+      - name: Push to Aptible remote branch
+        run: git push --force $APTIBLE_REMOTE_URL "${GITHUB_SHA}:${DEPLOY_HANDLE}"
+      - name: Set Aptible environment variables and deploy
+        run: |
+          wget -O aptible-package https://omnibus-aptible-toolbelt.s3.amazonaws.com/aptible/omnibus-aptible-toolbelt/master/206/pkg/aptible-toolbelt_0.16.5%2B20200508143656~ubuntu.16.04-1_amd64.deb
+          sudo dpkg -i aptible-package
+          aptible login --email=$APTIBLE_USERNAME --password=$APTIBLE_PASSWORD
+          aptible deploy --app app-staging --git-commitish ${GITHUB_SHA} \
+          $(cat ${{ secrets.APTIBLE_ENV_VARS }} )
+  draft-release:
+    name: Draft a new release
+    needs: deploy
+    if: ${{ github.event.workflow_run.conclusion == 'success' }} && ${{ $CREATE_TAG == 'TRUE' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create tag name
+        id: create-tagname
+        run: echo "::set-output name=TAG_NAME::$(date +'%Y-%m-%d-%H%M')"
+      - name: Draft Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: release-${{ steps.create-tagname.outputs.TAG_NAME }}
+          release_name: release-${{ steps.create-tagname.outputs.TAG_NAME }}
+          commitish: ${{ github.event.inputs.branch }}
+          body: |
+            Fill in details about this release
+          draft: true
+          prerelease: true
+  merge_to_staging:
+    name: Merge main -> staging
+    needs: deploy
+    if: ${{ github.event.workflow_run.conclusion == 'success' }} && {{ $MERGE_MAIN_TO_STAGING == 'TRUE' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: '0'
+          ref: main
+      - uses: MaximeHeckel/github-action-merge-fast-forward@v1.1.1
+        with:
+          branchtomerge: main
+          branch: staging
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
